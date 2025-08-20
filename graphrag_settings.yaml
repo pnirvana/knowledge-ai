@@ -1,0 +1,97 @@
+# --- Minimal BYOG config (global search, no text ingestion) ---
+
+models:
+  default_chat_model:
+    type: openai_chat
+    auth_type: api_key
+    api_key: ${GRAPHRAG_API_KEY}
+    # NOTE: Keep a known-good model until GPT‑5 is officially supported
+    model: gpt-4o
+    model_supports_json: true
+    concurrent_requests: 25
+    async_mode: threaded
+    retry_strategy: native
+    max_retries: 10
+    tokens_per_minute: auto
+    requests_per_minute: auto
+
+  default_embedding_model:
+    # Not needed for global search, but keep a default in case you enable local/DRIFT later
+    type: openai_embedding
+    auth_type: api_key
+    api_key: ${GRAPHRAG_API_KEY}
+    model: text-embedding-3-small
+    model_supports_json: true
+    concurrent_requests: 25
+    async_mode: threaded
+    retry_strategy: native
+    max_retries: 10
+
+# Tell GraphRAG to load a prebuilt graph from Parquet files
+graph:
+  store:
+    type: parquet
+    path: /Users/pascal/Dev/ai-knowledgebase/graphrag/graphrag_proj/output   # contains entities.parquet + relationships.parquet
+
+prune_graph:
+  min_node_freq: 0
+  min_node_degree: 0
+  min_edge_weight_pct: 0.0
+  remove_ego_nodes: false
+  lcc_only: false
+
+cluster_graph:
+  use_lcc: false
+  max_cluster_size: 10000
+
+# Optional cache/output locations
+output:
+  type: file
+  base_dir: "output"
+
+cache:
+  type: file
+  base_dir: "cache"
+
+reporting:
+  type: file
+  base_dir: "logs"
+
+# Vector store is only used if you enable local/DRIFT later
+vector_store:
+  default_vector_store:
+    type: lancedb
+    db_uri: output/lancedb
+    container_name: default
+    overwrite: true
+
+# Workflows: BYOG only needs communities + reports
+workflows:
+  - create_communities
+  - create_community_reports        # keep our fallback community
+  - generate_text_embeddings        # build vector index for local/drift
+
+# Query settings
+
+global_search:
+  chat_model_id: default_chat_model
+  map_prompt: "prompts/global_search_map_system_prompt.txt"
+  reduce_prompt: "prompts/global_search_reduce_system_prompt.txt"
+  knowledge_prompt: "prompts/global_search_knowledge_system_prompt.txt"
+  allow_general_knowledge: true
+  top_k_communities: 3
+  top_k_entities: 200
+  top_k_relationships: 400
+  max_context_tokens: 6000
+
+# Leave these defined (prompts exist), but they won't run unless you enable embeddings
+local_search:
+  chat_model_id: default_chat_model
+  embedding_model_id: default_embedding_model
+  prompt: "prompts/local_search_system_prompt.txt"
+
+drift_search:
+  chat_model_id: default_chat_model
+  embedding_model_id: default_embedding_model
+  prompt: "prompts/drift_search_system_prompt.txt"
+  reduce_prompt: "prompts/drift_search_reduce_prompt.txt"
