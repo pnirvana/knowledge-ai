@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "/Users/pascal/Dev/ai-knowledgebase/graphrag/run_mcp.sh",
+      "args": [],
+      "cwd": "/Users/pascal/Dev/ai-knowledgebase/graphrag",
+      "env": {
+        "GRAPH_OUTPUT_DIR": "/Users/pascal/Dev/ai-knowledgebase/graphrag/graphrag_proj/output",
+        "CODEGRAPH_ALLOWLIST": "/Users/pascal/Dev/ai-knowledgebase/sorce",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  }
+}
