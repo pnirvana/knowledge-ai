@@ -13,6 +13,8 @@ Env:
 import os, json, pathlib, re
 import asyncio
 from typing import List, Optional, Dict, Any
+import uvicorn
+import asyncio
 
 # --- JSON sanitization helpers ---
 def _json_sanitize(obj):
@@ -73,6 +75,8 @@ import networkx as nx
 # MCP SDK
 import sys
 from mcp.server.fastmcp import FastMCP
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 # Load environment variables from .env if present
 try:
@@ -439,6 +443,8 @@ def _resolve_source(nid: str) -> Optional[Dict[str, Any]]:
         out["end_line"] = int(e_hint)
     return out
 
+
+app = FastAPI()
 mcp = FastMCP("codegraph-mcp")
 
 # --- Heuristic span guessing for source fallback ---
@@ -904,9 +910,209 @@ def open_file(path: str, start: int = 1, end: Optional[int] = None) -> str:
         return _json.dumps({"error":err}, indent=2)
     return _json.dumps({"path":path,"slice":txt}, indent=2)
 
+# HTTP endpoints - Root endpoint for MCP JSON-RPC protocol
+from starlette.responses import StreamingResponse
+
+@app.get("/")
+async def mcp_sse_endpoint(request: Request):
+    """Handle SSE connection for server notifications"""
+    import sys
+    print(f"\n[MCP DEBUG] SSE GET request received at /", file=sys.stderr, flush=True)
+    print(f"[MCP DEBUG] Headers: {dict(request.headers)}", file=sys.stderr, flush=True)
+
+    async def event_generator():
+        """Keep the SSE connection alive and send events when needed"""
+        # Send initial connection message
+        yield f"event: message\ndata: {json.dumps({'type': 'connection', 'status': 'connected'})}\n\n"
+
+        # Keep connection alive with periodic pings
+        while True:
+            await asyncio.sleep(30)  # Send keepalive every 30 seconds
+            yield f": keepalive\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+@app.post("/")
+async def mcp_jsonrpc_root(request: Request):
+    """Handle MCP JSON-RPC messages at root"""
+    data = await request.json()
+
+    # Debug logging
+    import sys
+    print(f"\n[MCP DEBUG] Received request:", file=sys.stderr, flush=True)
+    print(f"[MCP DEBUG] Headers: {dict(request.headers)}", file=sys.stderr, flush=True)
+    print(f"[MCP DEBUG] Body: {json.dumps(data, indent=2)}", file=sys.stderr, flush=True)
+
+    method = data.get("method")
+    msg_id = data.get("id")
+
+    if method == "initialize":
+        response = {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "codegraph-mcp", "version": "1.0.0"}
+            }
+        }
+        print(f"[MCP DEBUG] Response: {json.dumps(response, indent=2)}", file=sys.stderr, flush=True)
+        return JSONResponse(content=response)
+    elif method == "tools/list":
+        tools = await mcp.list_tools()
+        tools_list = []
+        for tool in tools:
+            if hasattr(tool, 'model_dump'):
+                tools_list.append(tool.model_dump())
+            elif hasattr(tool, 'dict'):
+                tools_list.append(tool.dict())
+        return JSONResponse(content={
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": {"tools": tools_list}
+        })
+    elif method == "tools/call":
+        params = data.get("params", {})
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+        print(f"[MCP DEBUG] Calling tool: {tool_name} with args: {arguments}", file=sys.stderr, flush=True)
+        try:
+            result = await mcp.call_tool(tool_name, arguments)
+            print(f"[MCP DEBUG] Raw tool result type: {type(result)}", file=sys.stderr, flush=True)
+            print(f"[MCP DEBUG] Raw tool result: {result}", file=sys.stderr, flush=True)
+
+            if isinstance(result, tuple) and len(result) == 2:
+                content_list, result_dict = result
+                print(f"[MCP DEBUG] Content list: {content_list}", file=sys.stderr, flush=True)
+                print(f"[MCP DEBUG] Result dict: {result_dict}", file=sys.stderr, flush=True)
+
+                # Convert TextContent objects to dictionaries
+                serialized_content = []
+                for item in content_list:
+                    if hasattr(item, 'model_dump'):
+                        serialized_content.append(item.model_dump())
+                    elif hasattr(item, 'dict'):
+                        serialized_content.append(item.dict())
+                    else:
+                        serialized_content.append(item)
+
+                # MCP protocol expects 'content' to be an array of content items
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {
+                        "content": serialized_content
+                    }
+                }
+                print(f"[MCP DEBUG] Sending response: {json.dumps(response, indent=2)}", file=sys.stderr, flush=True)
+                return JSONResponse(content=response)
+        except Exception as e:
+            import traceback
+            print(f"[MCP DEBUG] Error calling tool: {e}", file=sys.stderr, flush=True)
+            print(f"[MCP DEBUG] Traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
+            return JSONResponse(content={
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -1, "message": str(e)}
+            })
+
+    # Handle notifications (no response needed)
+    if method and method.startswith("notifications/"):
+        print(f"[MCP DEBUG] Notification received: {method}", file=sys.stderr, flush=True)
+        # Notifications don't require a response, just return 200 OK
+        return JSONResponse(content={})
+
+    return JSONResponse(content={
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"}
+    })
+
+@app.post("/mcp")
+async def initialize(request: Request):
+    data = await request.json()
+    return JSONResponse(content={
+        "jsonrpc": "2.0",
+        "id": data.get("id"),
+        "result": {
+            "protocolVersion": "0.1.0",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "codegraph-mcp", "version": "1.0.0"}
+        }
+    })
+
+@app.post("/mcp/tools/list")
+async def list_tools_http():
+    # Use FastMCP's built-in list_tools method (async)
+    tools = await mcp.list_tools()
+    # Convert Tool objects to dictionaries
+    tools_list = []
+    for tool in tools:
+        if hasattr(tool, 'model_dump'):
+            # Pydantic v2
+            tools_list.append(tool.model_dump())
+        elif hasattr(tool, 'dict'):
+            # Pydantic v1
+            tools_list.append(tool.dict())
+        else:
+            # Fallback to converting attributes manually
+            tools_list.append({
+                "name": getattr(tool, 'name', str(tool)),
+                "description": getattr(tool, 'description', ''),
+                "inputSchema": getattr(tool, 'inputSchema', {})
+            })
+    return JSONResponse(content={"tools": tools_list})
+
+@app.post("/mcp/tools/call")
+async def call_tool_http(request: Request):
+    data = await request.json()
+    tool_name = data.get("name")
+    arguments = data.get("arguments", {})
+
+    try:
+        # Use FastMCP's built-in call_tool method (async)
+        result = await mcp.call_tool(tool_name, arguments)
+
+        # Extract the actual result from the MCP response
+        # FastMCP returns a tuple: (content_list, dict_with_result)
+        if isinstance(result, tuple) and len(result) == 2:
+            content_list, result_dict = result
+            # The second element is the actual result dict
+            return JSONResponse(content=result_dict)
+        elif hasattr(result, 'model_dump'):
+            # Pydantic v2
+            result_dict = result.model_dump()
+            return JSONResponse(content=result_dict)
+        elif hasattr(result, 'dict'):
+            # Pydantic v1
+            result_dict = result.dict()
+            return JSONResponse(content=result_dict)
+        else:
+            return JSONResponse(content={"result": str(result)})
+
+    except Exception as e:
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
+        )
+
 
 if __name__ == "__main__":
     # Simple runtime diagnostics to stderr
     print(f"[diag] FastMCP starting; py={sys.version}", file=sys.stderr, flush=True)
     # FastMCP v1.13+: run() uses stdio transport by default
-    mcp.run()
+    # mcp.run()
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
+    )

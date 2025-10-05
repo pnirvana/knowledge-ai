@@ -41,5 +41,8 @@ python-dotenv>=1.0.1
 mcp==1.13.0
 anyio>=4.4
 pydantic>=2.7
+# HTTP transport support
+fastapi>=0.115.0
+uvicorn>=0.32.0
 # Optional for semantic search over text_units
 # faiss-cpu>=1.7.4
